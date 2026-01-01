@@ -1,6 +1,8 @@
 mod connection;
 mod diff;
 mod mention;
+#[cfg(feature = "sigma")]
+mod sigma_meta;
 mod terminal;
 use action_log::{ActionLog, ActionLogTelemetry};
 use agent_client_protocol::schema as acp;
@@ -16,6 +18,8 @@ use language::language_settings::FormatOnSave;
 use language::{Anchor, Buffer, BufferSnapshot, LanguageRegistry, Point, ToPoint, text_diff};
 use markdown::Markdown;
 pub use mention::*;
+#[cfg(feature = "sigma")]
+pub use sigma_meta::*;
 use project::lsp_store::{FormatTrigger, LspFormatTarget};
 use project::{AgentLocation, Project, git_store::GitStoreCheckpoint};
 use serde::{Deserialize, Serialize};
@@ -87,11 +91,51 @@ pub fn subagent_session_info_from_meta(meta: &Option<acp::Meta>) -> Option<Subag
         .and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 
+pub fn cached_percent_from_meta(meta: &Option<acp::Meta>) -> Option<u64> {
+    meta.as_ref()
+        .and_then(|m| m.get("cached_percent"))
+        .and_then(|v| v.as_u64())
+}
+
+pub fn result_slug_from_meta(meta: &Option<acp::Meta>) -> Option<SharedString> {
+    meta.as_ref()
+        .and_then(|m| m.get("sigma_result_slug"))
+        .and_then(|v| v.as_str())
+        .map(|s| SharedString::from(s.to_owned()))
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::*;
+
+    #[test]
+    fn cached_percent_from_meta_reads_u64_field() {
+        let meta = Some(acp::Meta::from_iter([(
+            "cached_percent".into(),
+            serde_json::Value::from(42_u64),
+        )]));
+        assert_eq!(cached_percent_from_meta(&meta), Some(42));
+    }
+
+    #[test]
+    fn result_slug_from_meta_reads_string_field() {
+        let meta = Some(acp::Meta::from_iter([(
+            "sigma_result_slug".into(),
+            serde_json::Value::String("task-foo--result-1".to_string()),
+        )]));
+        assert_eq!(
+            result_slug_from_meta(&meta).as_deref(),
+            Some("task-foo--result-1")
+        );
+    }
+}
+
 #[derive(Debug)]
 pub struct UserMessage {
     pub id: Option<UserMessageId>,
     pub content: ContentBlock,
     pub chunks: Vec<acp::ContentBlock>,
+    pub meta: Option<acp::Meta>,
     pub checkpoint: Option<Checkpoint>,
     pub indented: bool,
 }
@@ -1041,6 +1085,8 @@ pub struct AcpThread {
     parent_session_id: Option<acp::SessionId>,
     title: Option<SharedString>,
     provisional_title: Option<SharedString>,
+    updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    meta: Option<acp::Meta>,
     entries: Vec<AgentThreadEntry>,
     plan: Plan,
     project: Entity<Project>,
@@ -1102,6 +1148,7 @@ pub enum AcpThreadEvent {
     PromptUpdated,
     NewEntry,
     TitleUpdated,
+    SessionInfoUpdated,
     TokenUsageUpdated,
     EntryUpdated(usize),
     EntriesRemoved(Range<usize>),
@@ -1235,6 +1282,8 @@ impl AcpThread {
             plan: Default::default(),
             title,
             provisional_title: None,
+            updated_at: None,
+            meta: None,
             project,
             running_turn: None,
             turn_id: 0,
@@ -1312,6 +1361,14 @@ impl AcpThread {
 
     pub fn has_provisional_title(&self) -> bool {
         self.provisional_title.is_some()
+    }
+
+    pub fn updated_at(&self) -> Option<&chrono::DateTime<chrono::Utc>> {
+        self.updated_at.as_ref()
+    }
+
+    pub fn meta(&self) -> Option<&acp::Meta> {
+        self.meta.as_ref()
     }
 
     pub fn entries(&self) -> &[AgentThreadEntry] {
@@ -1460,14 +1517,38 @@ impl AcpThread {
                 self.update_plan(plan, cx);
             }
             acp::SessionUpdate::SessionInfoUpdate(info_update) => {
+                let mut session_info_changed = false;
                 if let acp::MaybeUndefined::Value(title) = info_update.title {
                     let had_provisional = self.provisional_title.take().is_some();
                     let title: SharedString = title.into();
                     if self.title.as_ref() != Some(&title) {
                         self.title = Some(title);
                         cx.emit(AcpThreadEvent::TitleUpdated);
+                        session_info_changed = true;
                     } else if had_provisional {
                         cx.emit(AcpThreadEvent::TitleUpdated);
+                        session_info_changed = true;
+                    }
+                }
+                if let acp::MaybeUndefined::Value(updated_at) = info_update.updated_at
+                    && let Ok(updated_at) = chrono::DateTime::parse_from_rfc3339(&updated_at)
+                {
+                    let updated_at = updated_at.with_timezone(&chrono::Utc);
+                    if self.updated_at.as_ref() != Some(&updated_at) {
+                        self.updated_at = Some(updated_at);
+                        session_info_changed = true;
+                    }
+                }
+                if let Some(meta) = info_update.meta {
+                    self.meta = Some(meta);
+                    session_info_changed = true;
+                }
+                if session_info_changed {
+                    cx.emit(AcpThreadEvent::SessionInfoUpdated);
+                    if self.work_dirs.is_some()
+                        && let Some(session_list) = self.connection.session_list(cx)
+                    {
+                        session_list.notify_refresh();
                     }
                 }
             }
@@ -1546,6 +1627,7 @@ impl AcpThread {
                     id: message_id,
                     content,
                     chunks: vec![chunk],
+                    meta: None,
                     checkpoint: None,
                     indented,
                 }),
@@ -2193,6 +2275,15 @@ impl AcpThread {
         message: Vec<acp::ContentBlock>,
         cx: &mut Context<Self>,
     ) -> BoxFuture<'static, Result<Option<acp::PromptResponse>>> {
+        self.send_with_meta(message, None, cx)
+    }
+
+    pub fn send_with_meta(
+        &mut self,
+        message: Vec<acp::ContentBlock>,
+        meta: Option<acp::Meta>,
+        cx: &mut Context<Self>,
+    ) -> BoxFuture<'static, Result<Option<acp::PromptResponse>>> {
         let block = ContentBlock::new_combined(
             message.clone(),
             self.project.read(cx).languages().clone(),
@@ -2211,6 +2302,7 @@ impl AcpThread {
                         id: Some(message_id.clone()),
                         content: block,
                         chunks: message,
+                        meta,
                         checkpoint: None,
                         indented: false,
                     }),
@@ -3024,7 +3116,7 @@ fn markdown_for_raw_output(
         })),
         serde_json::Value::String(value) => Some(cx.new(|cx| {
             Markdown::new(
-                value.clone().into(),
+                format!("```\n{}\n```", value).into(),
                 Some(language_registry.clone()),
                 None,
                 cx,
@@ -5000,6 +5092,7 @@ mod tests {
                     id: Some(UserMessageId::new()),
                     content: ContentBlock::Empty,
                     chunks: vec!["Injected message (no checkpoint)".into()],
+                    meta: None,
                     checkpoint: None,
                     indented: false,
                 }),

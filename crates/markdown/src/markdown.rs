@@ -107,6 +107,10 @@ pub struct MarkdownStyle {
     pub selection_background_color: Hsla,
     pub heading: StyleRefinement,
     pub heading_level_styles: Option<HeadingLevelStyles>,
+    pub emphasis_color: Hsla,
+    pub strong_color: Hsla,
+    pub strikethrough_color: Hsla,
+    pub list_marker_color: Hsla,
     pub height_is_multiple_of_line_height: bool,
     pub prevent_mouse_interaction: bool,
     pub table_columns_min_size: bool,
@@ -130,6 +134,10 @@ impl Default for MarkdownStyle {
             selection_background_color: Default::default(),
             heading: Default::default(),
             heading_level_styles: None,
+            emphasis_color: Default::default(),
+            strong_color: Default::default(),
+            strikethrough_color: Default::default(),
+            list_marker_color: Default::default(),
             height_is_multiple_of_line_height: false,
             prevent_mouse_interaction: false,
             table_columns_min_size: false,
@@ -201,8 +209,6 @@ impl MarkdownStyle {
             base_text_style: text_style.clone(),
             syntax: syntax.clone(),
             selection_background_color: colors.element_selection_background,
-            rule_color: colors.border,
-            block_quote_border_color: colors.border,
             block_quote_kind_colors: {
                 let status = cx.theme().status();
                 BlockQuoteKindColors {
@@ -252,6 +258,7 @@ impl MarkdownStyle {
                 font_features: Some(theme_settings.buffer_font.features.clone()),
                 font_size: Some(buffer_font_size.into()),
                 font_weight: Some(buffer_font_weight),
+                color: Some(text_color),
                 background_color: Some(colors.editor_foreground.opacity(0.08)),
                 ..Default::default()
             },
@@ -269,30 +276,60 @@ impl MarkdownStyle {
                 HeadingLevelStyles {
                     h1: Some(TextStyleRefinement {
                         font_size: Some(rems(1.15).into()),
+                        color: Some(text_color),
+                        font_weight: Some(FontWeight::EXTRA_BOLD),
                         ..Default::default()
                     }),
                     h2: Some(TextStyleRefinement {
                         font_size: Some(rems(1.1).into()),
+                        color: Some(text_color),
+                        font_weight: Some(FontWeight::BOLD),
                         ..Default::default()
                     }),
                     h3: Some(TextStyleRefinement {
                         font_size: Some(rems(1.05).into()),
+                        color: Some(text_color),
+                        font_weight: Some(FontWeight::BOLD),
                         ..Default::default()
                     }),
                     h4: Some(TextStyleRefinement {
                         font_size: Some(rems(1.).into()),
+                        color: Some(text_color),
+                        font_weight: Some(FontWeight::SEMIBOLD),
                         ..Default::default()
                     }),
                     h5: Some(TextStyleRefinement {
                         font_size: Some(rems(0.95).into()),
+                        color: Some(text_color),
+                        font_weight: Some(FontWeight::SEMIBOLD),
                         ..Default::default()
                     }),
                     h6: Some(TextStyleRefinement {
                         font_size: Some(rems(0.875).into()),
+                        color: Some(text_color),
                         ..Default::default()
                     }),
                 },
             ),
+            block_quote: TextStyleRefinement {
+                color: Some(colors.text_muted),
+                font_style: Some(FontStyle::Italic),
+                ..Default::default()
+            },
+            block_quote_border_color: colors.border_variant,
+            rule_color: colors.border,
+            heading: StyleRefinement {
+                text: TextStyleRefinement {
+                    color: Some(text_color),
+                    font_weight: Some(FontWeight::BOLD),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            emphasis_color: text_color,
+            strong_color: text_color,
+            strikethrough_color: colors.text_muted,
+            list_marker_color: colors.text_muted,
             ..Default::default()
         }
     }
@@ -1895,26 +1932,35 @@ impl Element for MarkdownElement {
                                         checkbox.visualization_only(true).into_any_element()
                                     }
                                 } else if let Some(bullet_index) = builder.next_bullet_index() {
-                                    div().child(format!("{}.", bullet_index)).into_any_element()
+                                    div()
+                                        .text_color(self.style.list_marker_color)
+                                        .child(format!("{}.", bullet_index))
+                                        .into_any_element()
                                 } else {
-                                    div().child("•").into_any_element()
+                                    div()
+                                        .text_color(self.style.list_marker_color)
+                                        .child("•")
+                                        .into_any_element()
                                 };
                             self.push_markdown_list_item(&mut builder, bullet, range, markdown_end);
                         }
                         MarkdownTag::Emphasis => builder.push_text_style(TextStyleRefinement {
                             font_style: Some(FontStyle::Italic),
+                            color: Some(self.style.emphasis_color),
                             ..Default::default()
                         }),
                         MarkdownTag::Strong => builder.push_text_style(TextStyleRefinement {
                             font_weight: Some(FontWeight::BOLD),
+                            color: Some(self.style.strong_color),
                             ..Default::default()
                         }),
                         MarkdownTag::Strikethrough => {
                             builder.push_text_style(TextStyleRefinement {
                                 strikethrough: Some(StrikethroughStyle {
                                     thickness: px(1.),
-                                    color: None,
+                                    color: Some(self.style.strikethrough_color),
                                 }),
+                                color: Some(self.style.strikethrough_color),
                                 ..Default::default()
                             })
                         }

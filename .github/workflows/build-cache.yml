@@ -1,0 +1,60 @@
+name: build-cache
+
+on:
+  push:
+    branches: [github-main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Install system deps
+        run: ./script/linux
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install sccache
+        run: ./script/setup-sccache
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          SCCACHE_BUCKET: sccache-sigma-zed
+
+      - name: Build zed (release, populate sccache)
+        run: cargo build --release --bin zed
+
+      - name: Show sccache stats
+        run: |
+          if [ -n "$RUSTC_WRAPPER" ]; then
+            "$RUSTC_WRAPPER" --show-stats
+          fi
+
+      - name: Trigger GitLab build pipeline (sccache is warm)
+        if: success()
+        env:
+          GITLAB_API_TOKEN: ${{ secrets.GITLAB_API_TOKEN }}
+        run: |
+          RESPONSE=$(curl -sS -w '\n%{http_code}' -X POST \
+            -H "PRIVATE-TOKEN: $GITLAB_API_TOKEN" \
+            --data-urlencode "ref=main" \
+            --data-urlencode "variables[][key]=BUILD_TRIGGERED_BY" \
+            --data-urlencode "variables[][value]=github-${{ github.run_id }}" \
+            "https://gitlab.myicecreamlab.com/api/v4/projects/org%2Fforks%2Fzed/pipeline")
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          STATUS=$(echo "$RESPONSE" | tail -n 1)
+          echo "HTTP $STATUS"
+          echo "$BODY" | jq '{id, web_url, status}' 2>/dev/null || echo "$BODY"
+          [ "$STATUS" = "201" ] || exit 1

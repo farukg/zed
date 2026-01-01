@@ -500,6 +500,10 @@ pub mod agent {
             ResetOnboarding,
             /// Starts a chat conversation with the agent.
             Chat,
+            /// Navigate to previous message in input history.
+            HistoryPrevious,
+            /// Navigate to next message in input history.
+            HistoryNext,
             /// Toggles the language model selector dropdown.
             #[action(deprecated_aliases = ["assistant::ToggleModelSelector", "assistant2::ToggleModelSelector"])]
             ToggleModelSelector,

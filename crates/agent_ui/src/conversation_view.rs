@@ -274,6 +274,7 @@ impl Conversation {
                     }
                     AcpThreadEvent::NewEntry
                     | AcpThreadEvent::TitleUpdated
+                    | AcpThreadEvent::SessionInfoUpdated
                     | AcpThreadEvent::TokenUsageUpdated
                     | AcpThreadEvent::EntryUpdated(_)
                     | AcpThreadEvent::EntriesRemoved(_)
@@ -460,6 +461,7 @@ fn resolve_outcome_from_selection(
 fn affects_thread_metadata(event: &AcpThreadEvent) -> bool {
     match event {
         AcpThreadEvent::NewEntry
+        | AcpThreadEvent::SessionInfoUpdated
         | AcpThreadEvent::TitleUpdated
         | AcpThreadEvent::ToolAuthorizationRequested(_)
         | AcpThreadEvent::ToolAuthorizationReceived(_)
@@ -560,6 +562,30 @@ impl ConversationView {
     pub fn thread_view(&self, session_id: &acp::SessionId) -> Option<Entity<ThreadView>> {
         let connected = self.as_connected()?;
         connected.threads.get(session_id).cloned()
+    }
+
+    #[cfg(feature = "sigma")]
+    pub fn sigma_session_titles(
+        &self,
+        cx: &App,
+    ) -> std::collections::HashMap<String, SharedString> {
+        let Some(connected) = self.as_connected() else {
+            return std::collections::HashMap::new();
+        };
+        connected
+            .threads
+            .iter()
+            .filter_map(|(session_id, thread_view)| {
+                let acp_thread = thread_view.read(cx).thread.read(cx);
+                let Some(title) = acp_thread.title() else {
+                    return None;
+                };
+                if title.is_empty() {
+                    return None;
+                }
+                Some((session_id.0.to_string(), SharedString::from(title.to_string())))
+            })
+            .collect()
     }
 
     pub fn as_connected(&self) -> Option<&ConnectedServerState> {
@@ -1601,7 +1627,7 @@ impl ConversationView {
                     cx,
                 );
             }
-            AcpThreadEvent::TitleUpdated => {
+            AcpThreadEvent::TitleUpdated | AcpThreadEvent::SessionInfoUpdated => {
                 if let Some(title) = thread.read(cx).title()
                     && let Some(active_thread) = self.thread_view(&session_id)
                 {
