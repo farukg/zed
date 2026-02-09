@@ -16,6 +16,7 @@ pub mod blink_manager;
 mod bracket_colorization;
 mod clangd_ext;
 pub mod code_context_menus;
+mod code_lens;
 pub mod display_map;
 mod document_colors;
 mod document_symbols;
@@ -97,6 +98,7 @@ use code_context_menus::{
     AvailableCodeAction, CodeActionContents, CodeActionsItem, CodeActionsMenu, CodeContextMenu,
     CompletionsMenu, ContextMenuOrigin,
 };
+use code_lens::CodeLensState;
 use collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use convert_case::{Case, Casing};
 use dap::TelemetrySpawnLocation;
@@ -1336,6 +1338,7 @@ pub struct Editor {
 
     selection_drag_state: SelectionDragState,
     colors: Option<LspColorData>,
+    code_lens: Option<CodeLensState>,
     post_scroll_update: Task<()>,
     refresh_colors_task: Task<()>,
     use_document_folding_ranges: bool,
@@ -2159,7 +2162,7 @@ impl Editor {
                 window,
                 |editor, _, event, window, cx| match event {
                     project::Event::RefreshCodeLens => {
-                        // we always query lens with actions, without storing them, always refreshing them
+                        editor.refresh_code_lenses(None, window, cx);
                     }
                     project::Event::RefreshInlayHints {
                         server_id,
@@ -2581,6 +2584,7 @@ impl Editor {
             runnables: RunnableData::new(),
             pull_diagnostics_task: Task::ready(()),
             colors: None,
+            code_lens: None,
             refresh_colors_task: Task::ready(()),
             use_document_folding_ranges: false,
             refresh_folding_ranges_task: Task::ready(()),
@@ -2753,6 +2757,7 @@ impl Editor {
             editor.colors = Some(LspColorData::new(cx));
             editor.use_document_folding_ranges = true;
             editor.inlay_hints = Some(LspInlayHintData::new(inlay_hint_settings));
+            editor.code_lens = Some(CodeLensState::new(cx));
 
             if let Some(buffer) = multi_buffer.read(cx).as_singleton() {
                 editor.register_buffer(buffer.read(cx).remote_id(), cx);
@@ -6829,11 +6834,11 @@ impl Editor {
         Some(cx.spawn_in(window, async move |editor, cx| {
             let additional_edits_tx = apply_edits.await?;
 
-            if let Some((lsp_store, command)) = lsp_store.zip(command) {
+            if let Some((lsp_store, mut command)) = lsp_store.zip(command) {
                 let title = command.lsp_action.title().to_owned();
                 let project_transaction = lsp_store
                     .update(cx, |lsp_store, cx| {
-                        lsp_store.apply_code_action(buffer_handle, command, false, cx)
+                        lsp_store.apply_code_action(buffer_handle, &mut command, false, cx)
                     })
                     .await
                     .context("applying post-completion command")?;
@@ -7131,6 +7136,10 @@ impl Editor {
                 })
             }
             CodeActionsItem::CodeAction { action, provider } => {
+                if code_lens::try_handle_client_command(&action, self, &workspace, window, cx) {
+                    return Some(Task::ready(Ok(())));
+                }
+
                 let apply_code_action =
                     provider.apply_code_action(buffer, action, true, window, cx);
                 let workspace = workspace.downgrade();
@@ -24822,6 +24831,14 @@ impl Editor {
                 self.refresh_document_colors(None, window, cx);
             }
 
+            if let Some(code_lens) = self.code_lens.as_mut() {
+                let new_enabled = EditorSettings::get_global(cx).code_lens.enabled();
+                if new_enabled != code_lens.enabled_in_settings {
+                    code_lens.enabled_in_settings = new_enabled;
+                    self.toggle_code_lens(new_enabled, window, cx);
+                }
+            }
+
             self.refresh_inlay_hints(
                 InlayHintRefreshReason::SettingsChange(inlay_hint_settings(
                     self.selections.newest_anchor().head(),
@@ -25994,6 +26011,7 @@ impl Editor {
         self.refresh_semantic_tokens(for_buffer, None, cx);
         self.refresh_document_colors(for_buffer, window, cx);
         self.refresh_folding_ranges(for_buffer, window, cx);
+        self.refresh_code_lenses(for_buffer, window, cx);
         self.refresh_document_symbols(for_buffer, cx);
     }
 

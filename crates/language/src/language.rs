@@ -72,7 +72,7 @@ use std::{
     sync::{Arc, LazyLock},
 };
 use syntax_map::{QueryCursorHandle, SyntaxSnapshot};
-use task::RunnableTag;
+use task::{RunnableTag, TaskTemplate};
 pub use task_context::{ContextLocation, ContextProvider, RunnableRange};
 pub use text_diff::{
     DiffOptions, apply_diff_patch, apply_reversed_diff_patch, char_diff, line_diff, text_diff,
@@ -202,6 +202,19 @@ pub static PLAIN_TEXT: LazyLock<Arc<Language>> = LazyLock::new(|| {
         None,
     ))
 });
+
+/// Commands that the client (editor) handles locally rather than forwarding
+/// to the language server. Servers embed these in code lens and code action
+/// responses when they want the editor to perform a well-known UI action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientCommand {
+    /// Open a location list (references panel / peek view).
+    ShowLocations,
+    /// Schedule a task from a server-specific command. The adapter's
+    /// [`LspAdapter::command_to_task`] method converts the raw command
+    /// arguments into a [`TaskTemplate`].
+    ScheduleTask,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Location {
@@ -554,6 +567,20 @@ pub trait LspAdapter: 'static + Send + Sync + DynLspInstaller {
         _: &App,
     ) -> Result<InitializeParams> {
         Ok(original)
+    }
+
+    /// Maps a command name received from the language server to a client-side
+    /// command kind for language-specific commands.
+    fn client_command(&self, _command_name: &str) -> Option<ClientCommand> {
+        None
+    }
+
+    /// Converts a language-server command (typically from a code lens or code
+    /// action) into a [`TaskTemplate`] that the editor can schedule. Called
+    /// when [`client_command`](Self::client_command) returns
+    /// [`ClientCommand::ScheduleTask`].
+    fn command_to_task(&self, _command: &lsp::Command) -> Option<TaskTemplate> {
+        None
     }
 
     /// Method only implemented by the default JSON language server adapter.
