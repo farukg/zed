@@ -5291,6 +5291,7 @@ dependencies = [
  "language",
  "pretty_assertions",
  "serde",
+ "serde_json",
  "similar",
  "tree-sitter",
  "zeta_prompt",
